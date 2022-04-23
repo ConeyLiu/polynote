@@ -1,20 +1,20 @@
 package polynote.kernel.remote
 
-import java.io.{BufferedReader, File}
-import java.net.{InetSocketAddress, URL}
+import java.io.File
+import java.net.{InetSocketAddress, URI, URISyntaxException, URL}
+
 import polynote.buildinfo.BuildInfo
-import polynote.config.{PolynoteConfig, SparkConfig}
-import polynote.kernel.{BaseEnv, Kernel, ScalaCompiler, remote}
+import polynote.config.PolynoteConfig
+import polynote.kernel.BaseEnv
 import polynote.kernel.environment.{Config, CurrentNotebook}
 import polynote.kernel.logging.Logging
 import polynote.kernel.remote.SocketTransport.DeploySubprocess.DeployCommand
-import polynote.kernel.util.{listFiles, pathOf}
+import polynote.kernel.util.listFiles
 import polynote.messages.NotebookConfig
-import polynote.runtime.KernelRuntime
 import zio.{RIO, URIO, ZIO, ZManaged}
 import zio.blocking.effectBlocking
 
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{Path, Paths}
 import java.util.concurrent.atomic.AtomicReference
 
 object DeploySparkSubmit extends DeployCommand {
@@ -38,12 +38,12 @@ object DeploySparkSubmit extends DeployCommand {
       nbConfig.sparkTemplate.map(_.properties).getOrElse(Map.empty) ++
       nbConfig.sparkConfig.getOrElse(Map.empty)
 
-    val sparkArgs = (sparkConfig - "sparkSubmitArgs" - "spark.driver.extraJavaOptions" - "spark.submit.deployMode" - "spark.driver.memory")
+    val sparkArgs = (sparkConfig - "sparkSubmitArgs" - "spark.driver.extraJavaOptions" - "spark.submit.deployMode" - "spark.driver.memory" - "spark.jars")
       .flatMap(kv => Seq("--conf", s"${kv._1}=${kv._2}"))
 
     val sparkSubmitArgs =
       nbConfig.sparkTemplate.flatMap(_.sparkSubmitArgs).toList.flatMap(parseQuotedArgs) ++
-      sparkConfig.get("sparkSubmitArgs").toList.flatMap(parseQuotedArgs)
+      config.spark.flatMap(_.sparkSubmitArgs).toList.flatMap(parseQuotedArgs)
 
     val isRemote = sparkConfig.get("spark.submit.deployMode") contains "cluster"
 
@@ -58,19 +58,66 @@ object DeploySparkSubmit extends DeployCommand {
 
     val appName = sparkConfig.getOrElse("spark.app.name", s"Polynote ${BuildInfo.version}: $notebookPath")
 
-    val runtimeJarsFilter = raw"polynote-(spark-)?runtime".r
-
     val applicationJar = additionalJars.find(_.getPath.contains("polynote-spark-assembly")).map(_.getPath).getOrElse(defaultJarLocation)
 
-    val jarsToAdd = additionalJars.filter(url => runtimeJarsFilter.findFirstMatchIn(url.getPath).nonEmpty)
+    val (updatedSparkSubmitArgs, jarsToAdd) = mergeSparkJarsParameter(sparkConfig, sparkSubmitArgs, additionalJars)
 
     Seq("spark-submit", "--class", mainClass, "--name", appName) ++
       Seq("--driver-java-options", allDriverOptions) ++
       sparkConfig.get("spark.driver.memory").toList.flatMap(mem => List("--driver-memory", mem)) ++
       (if (isRemote) Seq("--deploy-mode", "cluster") else Nil) ++
-      sparkSubmitArgs ++ Seq("--driver-class-path", classPath.map(_.getPath).mkString(File.pathSeparator)) ++
+      updatedSparkSubmitArgs ++ Seq("--driver-class-path", classPath.map(_.getPath).mkString(File.pathSeparator)) ++
       (if (jarsToAdd.nonEmpty) Seq("--jars", jarsToAdd.mkString(",")) else Nil) ++
       sparkArgs ++ Seq(applicationJar) ++ serverArgs
+  }
+
+  def mergeSparkJarsParameter(
+      sparkConfig: Map[String, String],
+      sparkSubmitArgs: List[String],
+      additionalJars: Seq[URL]): (List[String], Seq[URL]) = {
+    // find jars from spark config
+    val jarsFromSparkConfig: Seq[URL] = sparkConfig
+      .get("spark.jars")
+      .map(s => s.split(",").filter(_.trim.nonEmpty).map(resolveURL).toSeq)
+      .getOrElse(Seq.empty)
+
+    // find jars from spark submit args
+    val prefixIndex = sparkSubmitArgs.indexWhere(_.trim.contains("--jars"))
+    val (jarsFromSubmitArgs, updatedSparkSubmitArgs) = if (prefixIndex != -1) {
+      val valueIndex = prefixIndex + 1
+      assert(valueIndex < sparkSubmitArgs.size, "Missing argument for Spark submit arguments --jars")
+      val jars = sparkSubmitArgs(valueIndex).split(",").filter(_.trim.nonEmpty).map(resolveURL).toSeq
+      val newSparkSubmitArgs = sparkSubmitArgs.zipWithIndex.filter(pair => pair._2 != prefixIndex || pair._2 != valueIndex).map(_._1)
+      (jars, newSparkSubmitArgs)
+    } else {
+      (Seq.empty, sparkSubmitArgs)
+    }
+
+    val runtimeJarsFilter = raw"polynote-(spark-)?runtime".r
+    val jarsFromAdditional = additionalJars.filter(url => runtimeJarsFilter.findFirstMatchIn(url.getPath).nonEmpty)
+
+    if (jarsFromSubmitArgs.nonEmpty) {
+      if (jarsFromSparkConfig.nonEmpty) {
+        Logging.warn("Both 'spark.jars' and '--jars' have been set, we will ignore the 'spark.jars' config")
+      }
+
+      (updatedSparkSubmitArgs, jarsFromAdditional ++ jarsFromSubmitArgs)
+    } else {
+      (updatedSparkSubmitArgs, jarsFromAdditional ++ jarsFromSparkConfig)
+    }
+  }
+
+  def resolveURL(path: String): URL = {
+    try {
+      val uri = new URI(path)
+      if (uri.getScheme != null) {
+        return uri.toURL
+      }
+
+    } catch {
+      case e: URISyntaxException =>
+    }
+    new File(path).getCanonicalFile.toURI.toURL
   }
 
   override def apply(serverAddress: InetSocketAddress, classPath: Seq[Path]): RIO[Config with CurrentNotebook, Seq[String]] = for {

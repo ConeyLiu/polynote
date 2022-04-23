@@ -1,15 +1,14 @@
 package polynote.kernel.remote
 
 import org.scalatest.{FreeSpec, Matchers}
-import polynote.config.PolynoteConfig
+import polynote.config.{PolynoteConfig, SparkConfig}
 import polynote.buildinfo.BuildInfo
 import polynote.messages.{NotebookConfig, TinyList}
 import polynote.testing.ZIOSpec
 import polynote.testing.MockSystem
-import zio.ZIO
 
 import java.io.File
-import java.net.{URI, URL}
+import java.net.URI
 import java.nio.file.{Files, Paths}
 
 class DeploySparkSubmitSpec extends FreeSpec with Matchers with ZIOSpec {
@@ -39,6 +38,95 @@ class DeploySparkSubmitSpec extends FreeSpec with Matchers with ZIOSpec {
 
     command should contain theSameElementsInOrderAs expected
   }
+
+  "Set --jars submit arguments correctly" in {
+    val sparkSubmitArgs = "--jars file:///path/to/test1.jar"
+    val sparkConfig = new SparkConfig(Map.empty, Some(sparkSubmitArgs))
+    val conf = PolynoteConfig(spark=Some(sparkConfig))
+    val jvmProps: Option[TinyList[String]] = Option(List("-Dprop=value"))
+    val nbConf = NotebookConfig(None, None, None, None, None, None, jvmArgs = jvmProps)
+    val nbPath = "foo"
+    val assemblyJar = "/path/to/polynote/polynote-spark-assembly.jar"
+    val cp = Seq(
+      URI.create("file:///path/to/my.jar").toURL,
+      URI.create("file:///path/to/not-a-jar/").toURL,
+      URI.create(s"file://${assemblyJar}").toURL)
+    val serverArgs = List("--address", "blah", "--port", "12345")
+
+    val expected =
+      "spark-submit" ::
+        "--class" :: "polynote.kernel.remote.RemoteKernelClient" ::
+        "--name" :: s"Polynote ${BuildInfo.version}: $nbPath" ::
+        "--driver-java-options" :: (jvmArgs(nbConf) ++ asPropString(javaOptions)).mkString(" ") ::
+        "--driver-class-path" :: cp.map(_.getPath).mkString(File.pathSeparator) ::
+        "--jars" :: "file:///path/to/test1.jar" ::
+        assemblyJar ::
+        serverArgs
+
+    val command = DeploySparkSubmit.build(conf, nbConf, nbPath, cp, serverArgs = serverArgs)
+
+    command should contain theSameElementsInOrderAs expected
+  }
+
+  "spark.jars should be set by --jars" in {
+    val properties = Map("spark.jars" -> "file:///path/to/test1.jar")
+    val sparkConfig = new SparkConfig(properties)
+    val conf = PolynoteConfig(spark=Some(sparkConfig))
+    val jvmProps: Option[TinyList[String]] = Option(List("-Dprop=value"))
+    val nbConf = NotebookConfig(None, None, None, None, None, None, jvmArgs = jvmProps)
+    val nbPath = "foo"
+    val assemblyJar = "/path/to/polynote/polynote-spark-assembly.jar"
+    val cp = Seq(
+      URI.create("file:///path/to/my.jar").toURL,
+      URI.create("file:///path/to/not-a-jar/").toURL,
+      URI.create(s"file://${assemblyJar}").toURL)
+    val serverArgs = List("--address", "blah", "--port", "12345")
+
+    val expected =
+      "spark-submit" ::
+        "--class" :: "polynote.kernel.remote.RemoteKernelClient" ::
+        "--name" :: s"Polynote ${BuildInfo.version}: $nbPath" ::
+        "--driver-java-options" :: (jvmArgs(nbConf) ++ asPropString(javaOptions)).mkString(" ") ::
+        "--driver-class-path" :: cp.map(_.getPath).mkString(File.pathSeparator) ::
+        "--jars" :: "file:///path/to/test1.jar" ::
+        assemblyJar ::
+        serverArgs
+
+    val command = DeploySparkSubmit.build(conf, nbConf, nbPath, cp, serverArgs = serverArgs)
+
+    command should contain theSameElementsInOrderAs expected
+  }
+
+  "--jars spark submit argument take higher priority than spark.jars" in {
+    val properties = Map("spark.jars" -> "file:///path/to/test1.jar")
+    val sparkSubmitArgs = "--jars file:///path/to/test2.jar"
+    val sparkConfig = new SparkConfig(properties, sparkSubmitArgs=Some(sparkSubmitArgs))
+    val conf = PolynoteConfig(spark=Some(sparkConfig))
+    val jvmProps: Option[TinyList[String]] = Option(List("-Dprop=value"))
+    val nbConf = NotebookConfig(None, None, None, None, None, None, jvmArgs = jvmProps)
+    val nbPath = "foo"
+    val assemblyJar = "/path/to/polynote/polynote-spark-assembly.jar"
+    val cp = Seq(
+      URI.create("file:///path/to/my.jar").toURL,
+      URI.create("file:///path/to/not-a-jar/").toURL,
+      URI.create(s"file://${assemblyJar}").toURL)
+    val serverArgs = List("--address", "blah", "--port", "12345")
+
+    val expected =
+      "spark-submit" ::
+        "--class" :: "polynote.kernel.remote.RemoteKernelClient" ::
+        "--name" :: s"Polynote ${BuildInfo.version}: $nbPath" ::
+        "--driver-java-options" :: (jvmArgs(nbConf) ++ asPropString(javaOptions)).mkString(" ") ::
+        "--driver-class-path" :: cp.map(_.getPath).mkString(File.pathSeparator) ::
+        "--jars" :: "file:///path/to/test2.jar" ::
+        assemblyJar ::
+        serverArgs
+
+    val command = DeploySparkSubmit.build(conf, nbConf, nbPath, cp, serverArgs = serverArgs)
+
+    command should contain theSameElementsInOrderAs expected
+  }
+
 
   "Detect scala version" - {
 
