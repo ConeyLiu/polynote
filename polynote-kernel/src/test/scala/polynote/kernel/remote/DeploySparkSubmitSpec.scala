@@ -39,7 +39,7 @@ class DeploySparkSubmitSpec extends FreeSpec with Matchers with ZIOSpec {
     command should contain theSameElementsInOrderAs expected
   }
 
-  "Set --jars submit arguments correctly" in {
+  "support set spark jars by spark submit arguments" in {
     val sparkSubmitArgs = "--jars file:///path/to/test1.jar"
     val sparkConfig = new SparkConfig(Map.empty, Some(sparkSubmitArgs))
     val conf = PolynoteConfig(spark=Some(sparkConfig))
@@ -68,7 +68,7 @@ class DeploySparkSubmitSpec extends FreeSpec with Matchers with ZIOSpec {
     command should contain theSameElementsInOrderAs expected
   }
 
-  "spark.jars should be set by --jars" in {
+  "support set spark jars by spark properties" in {
     val properties = Map("spark.jars" -> "file:///path/to/test1.jar")
     val sparkConfig = new SparkConfig(properties)
     val conf = PolynoteConfig(spark=Some(sparkConfig))
@@ -97,7 +97,7 @@ class DeploySparkSubmitSpec extends FreeSpec with Matchers with ZIOSpec {
     command should contain theSameElementsInOrderAs expected
   }
 
-  "--jars spark submit argument take higher priority than spark.jars" in {
+  "--jars take higher priority than spark.jars" in {
     val properties = Map("spark.jars" -> "file:///path/to/test1.jar")
     val sparkSubmitArgs = "--jars file:///path/to/test2.jar"
     val sparkConfig = new SparkConfig(properties, sparkSubmitArgs=Some(sparkSubmitArgs))
